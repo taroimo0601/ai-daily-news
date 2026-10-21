@@ -502,6 +502,81 @@ function renderDigest(digest, scrollActiveIntoView = false) {
   }
 
   updateSummaryCounts(digest, scrollActiveIntoView);
+  autoTranslateDigestItems(digest);
+}
+
+function isMostlyEnglishText(str) {
+  if (!str) return false;
+  if (/[\u3040-\u30ff]/.test(str)) return false;
+  const asciiCount = (str.match(/[a-zA-Z]/g) || []).length;
+  return asciiCount > 5;
+}
+
+async function translateTextEnToJa(text) {
+  const cleaned = String(text || "").trim();
+  if (!cleaned || !isMostlyEnglishText(cleaned)) return cleaned;
+
+  const cacheKey = `tr_ja_${cleaned.slice(0, 120)}`;
+  try {
+    const cached = localStorage.getItem(cacheKey);
+    if (cached) return cached;
+  } catch {
+    // ignore
+  }
+
+  try {
+    const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(
+      cleaned.slice(0, 450)
+    )}&langpair=en|ja`;
+    const res = await fetch(url);
+    if (!res.ok) return cleaned;
+    const data = await res.json();
+    const translated = (data?.responseData?.translatedText || "").trim();
+    if (translated && !translated.includes("MYMEMORY WARNING")) {
+      try {
+        localStorage.setItem(cacheKey, translated);
+      } catch {
+        // ignore
+      }
+      return translated;
+    }
+  } catch {
+    // ignore network errors
+  }
+  return cleaned;
+}
+
+async function autoTranslateDigestItems(digest) {
+  if (!digest || !Array.isArray(digest.items)) return;
+  let updated = false;
+
+  for (const item of digest.items) {
+    if (item._translatedAttempted) continue;
+    item._translatedAttempted = true;
+
+    if (isMostlyEnglishText(item.title_ja)) {
+      const jaTitle = await translateTextEnToJa(item.title_ja);
+      if (jaTitle !== item.title_ja) {
+        item.title_ja = jaTitle;
+        updated = true;
+      }
+    }
+    if (Array.isArray(item.points)) {
+      for (let i = 0; i < item.points.length; i++) {
+        if (isMostlyEnglishText(item.points[i])) {
+          const jaPt = await translateTextEnToJa(item.points[i]);
+          if (jaPt !== item.points[i]) {
+            item.points[i] = jaPt;
+            updated = true;
+          }
+        }
+      }
+    }
+  }
+
+  if (updated && currentDigest === digest) {
+    renderDigest(digest, false);
+  }
 }
 
 const PASSWORD_STORAGE_KEY = "morning_ai_site_password";

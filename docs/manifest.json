@@ -1,0 +1,9 @@
+{
+  "name": "Morning AI Digest",
+  "short_name": "Morning AI",
+  "description": "毎朝3分で読めるAIニュース厳選ダイジェスト",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a"
+}

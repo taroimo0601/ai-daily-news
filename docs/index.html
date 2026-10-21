@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="robots" content="noindex, nofollow, noarchive" />
+  <meta name="theme-color" content="#0f172a" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Morning AI" />
+  <title>Morning AI Digest | 毎朝のおすすめAIニュース10選</title>
+  <link rel="manifest" href="./manifest.json" />
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <!-- パスワードロック画面（未認証時のみ表示） -->
+  <div id="auth-overlay" class="auth-overlay" aria-modal="true" role="dialog">
+    <div class="auth-card">
+      <div class="auth-icon">🔒</div>
+      <h2 class="auth-title">プライベート・ダイジェスト</h2>
+      <p class="auth-desc">閲覧用のパスワードを入力してください（一度入力するとこの端末に記憶されます）</p>
+      <form id="auth-form" class="auth-form">
+        <input
+          id="auth-password-input"
+          class="auth-input"
+          type="password"
+          placeholder="パスワードを入力"
+          autocomplete="current-password"
+          required
+        />
+        <p id="auth-error" class="auth-error" hidden>パスワードが正しくありません</p>
+        <button class="auth-submit-btn" type="submit">ロックを解除</button>
+      </form>
+      <p id="auth-demo-hint" class="auth-demo-hint">※初期サンプルのパスワードは <code>0000</code> です（GitHubの <code>SITE_PASSWORD</code> で自由に変更可能）</p>
+    </div>
+  </div>
+
+  <header class="app-header">
+    <div class="header-inner">
+      <div class="brand">
+        <span class="brand-badge">DAILY TOP 10</span>
+        <h1>Morning AI Digest</h1>
+      </div>
+      <div class="header-controls">
+        <button id="unread-filter-btn" class="filter-toggle-btn" type="button" title="未読記事のみ表示">
+          未読のみ
+        </button>
+        <select id="date-select" aria-label="日付を選択"></select>
+        <button id="theme-toggle" class="icon-btn" type="button" aria-label="テーマ切り替え" title="ダーク/ライト切替">
+          ◐
+        </button>
+        <button id="lock-btn" class="icon-btn" type="button" aria-label="画面をロック" title="パスワードロック画面に戻す">
+          🔒
+        </button>
+      </div>
+    </div>
+
+    <div class="tabs-wrapper">
+      <button id="tabs-scroll-left" class="tabs-nav-btn" type="button" aria-label="左へスクロール">‹</button>
+      <nav id="site-tabs" class="category-tabs" aria-label="サイト別絞り込み">
+        <!-- JavaScriptでサイトごとのタブを自動生成 -->
+      </nav>
+      <button id="tabs-scroll-right" class="tabs-nav-btn" type="button" aria-label="右へスクロール">›</button>
+    </div>
+  </header>
+
+  <main id="app-main" class="container" hidden>
+    <section id="daily-overview" class="overview-card">
+      <div class="overview-meta">
+        <span id="digest-date" class="digest-date">----/--/--</span>
+        <div class="progress-group">
+          <span id="read-progress" class="read-progress">既読 0 / 10</span>
+          <button id="reset-read-btn" class="text-link-btn" type="button">既読リセット</button>
+        </div>
+      </div>
+      <h2 id="digest-headline" class="overview-headline">読み込み中...</h2>
+      <p id="digest-overview" class="overview-text"></p>
+      <p class="auto-read-hint">※記事タイトル・「元記事を開く」・「既読にする」をタップ（クリック）した記事のみ既読になります</p>
+    </section>
+
+    <section id="news-list" class="news-list" aria-live="polite"></section>
+  </main>
+
+  <footer class="app-footer">
+    <p>Powered by Gemini API &amp; GitHub Actions (完全無料・プライベート保護対応)</p>
+  </footer>
+
+  <script src="./app.js"></script>
+</body>
+</html>

@@ -197,25 +197,81 @@ def load_recent_urls(days: int = 3) -> set[str]:
     return seen_urls
 
 
-def call_github_models_fallback(prompt: str, github_token: str) -> dict:
-    """GitHub Actions内蔵のGITHUB_TOKEN（無料枠）を使ってOpenAI互換モデルで要約を生成する"""
+def is_mostly_english(text: str) -> bool:
+    if not text:
+        return False
+    # ひらがな・カタカナが含まれていれば日本語と判定
+    if re.search(r"[\u3040-\u30ff]", text):
+        return False
+    ascii_letters = sum(1 for c in text if ("a" <= c.lower() <= "z"))
+    return ascii_letters > 5
+
+
+def translate_en_to_ja(text: str) -> str:
+    """APIキー不要の無料翻訳API（MyMemory）で英語テキストを自然な日本語に翻訳する"""
+    cleaned = text.strip()
+    if not cleaned or not is_mostly_english(cleaned):
+        return cleaned
+    try:
+        resp = requests.get(
+            "https://api.mymemory.translated.net/get",
+            params={"q": cleaned[:480], "langpair": "en|ja"},
+            headers=HEADERS,
+            timeout=12,
+        )
+        resp.raise_for_status()
+        translated = (
+            resp.json().get("responseData", {}).get("translatedText", "").strip()
+        )
+        if translated and "MYMEMORY WARNING" not in translated:
+            return html.unescape(translated)
+    except Exception as e:
+        print(f"[WARN] Translation fallback error: {e}")
+    return cleaned
+
+
+def call_github_models_fallback(candidates: list[dict], date_str: str, github_token: str) -> dict:
+    """GitHub Actions内蔵のGITHUB_TOKEN（無料枠）を使って日本語要約を生成する"""
     url = "https://models.github.ai/inference/chat/completions"
-    schema_instruction = """
-出力は必ず以下のJSON形式のみ（マークダウンのコードブロックなし）で返してください:
-{
-  "headline": "キャッチコピー（35文字以内）",
-  "overview": "今日の全体トレンドの30秒サマリー（120〜180文字程度）",
+    # トークン上限を超えないよう各サイトからバランスよく最大14件に絞って渡す
+    by_source: dict[str, list[dict]] = {}
+    for c in candidates:
+        by_source.setdefault(c["source"], []).append(c)
+    compact_list = []
+    for round_idx in range(3):
+        for src, items in by_source.items():
+            if round_idx < len(items) and len(compact_list) < 14:
+                it = items[round_idx]
+                compact_list.append({
+                    "candidate_id": it["candidate_id"],
+                    "source": it["source"],
+                    "category": it["category"],
+                    "title": it["title"][:120],
+                    "summary": it.get("summary", "")[:220],
+                })
+
+    prompt = f"""本日（{date_str}）のAIニュース候補リストから、スマホで読める「今日のおすすめAIニュース10件」を厳選し、英語の記事・論文もすべて自然な日本語に翻訳・要約してJSONで出力してください。
+- 必ず合計10件選び、各ニュースの title_ja（日本語タイトル）、points（日本語3行の要点リスト）、insight（日本語の一言解説）、rating（1〜5の整数）、candidate_id（元の整数ID）を含めてください。
+- 英語のまま残さず、必ずすべて日本語で記述してください。
+
+候補リスト:
+{json.dumps(compact_list, ensure_ascii=False)}
+
+出力形式（純粋なJSONのみ）:
+{{
+  "headline": "キャッチコピー（35文字以内・日本語）",
+  "overview": "今日の全体トレンドの30秒サマリー（120〜180文字程度・日本語）",
   "items": [
-    {
+    {{
       "candidate_id": 0,
       "title_ja": "日本語タイトル（45文字以内）",
       "rating": 5,
-      "points": ["要点1", "要点2", "要点3"],
-      "insight": "一言解説（60〜90文字程度）"
-    }
+      "points": ["日本語の要点1", "日本語の要点2", "日本語の要点3"],
+      "insight": "日本語の一言解説（60〜90文字程度）"
+    }}
   ]
-}
-"""
+}}"""
+
     resp = requests.post(
         url,
         headers={
@@ -225,8 +281,8 @@ def call_github_models_fallback(prompt: str, github_token: str) -> dict:
         json={
             "model": "openai/gpt-4o-mini",
             "messages": [
-                {"role": "system", "content": "You are a helpful AI news curator that outputs valid JSON in Japanese."},
-                {"role": "user", "content": prompt + "\n" + schema_instruction},
+                {"role": "system", "content": "あなたは優秀な日本のAIニュース編集者です。すべてのタイトルと要約を自然な日本語に翻訳してJSON形式で出力します。"},
+                {"role": "user", "content": prompt},
             ],
             "response_format": {"type": "json_object"},
             "temperature": 0.3,
@@ -239,7 +295,7 @@ def call_github_models_fallback(prompt: str, github_token: str) -> dict:
 
 
 def build_rss_fallback_digest(indexed_candidates: list[dict], date_str: str) -> dict:
-    """APIクレジット不足時でもワークフローを止めずにサイト別10件を生成するフォールバック"""
+    """APIクレジット不足時でも無料翻訳を使ってサイト別10件を日本語で生成するフォールバック"""
     by_source: dict[str, list[dict]] = {}
     for c in indexed_candidates:
         by_source.setdefault(c["source"], []).append(c)
@@ -253,21 +309,39 @@ def build_rss_fallback_digest(indexed_candidates: list[dict], date_str: str) -> 
 
     resolved_items = []
     for idx, orig in enumerate(selected):
-        summary_text = orig.get("summary", "") or orig["title"]
-        sentences = [s.strip() for s in re.split(r"[。.!?！？]+", summary_text) if len(s.strip()) > 8]
-        points = sentences[:3]
-        while len(points) < 3:
-            points.append(f"{orig['source']}で公開された注目トピックです（詳細は元記事を参照）")
+        title_ja = translate_en_to_ja(orig["title"])[:65]
+        raw_summary = orig.get("summary", "") or orig["title"]
+        summary_ja = translate_en_to_ja(raw_summary)
+
+        sentences = [
+            s.strip()
+            for s in re.split(r"[。.!?！？\n]+", summary_ja)
+            if len(s.strip()) > 6
+        ]
+        points = [s + ("。" if not s.endswith("。") else "") for s in sentences[:3]]
+        if not points:
+            points.append(f"{title_ja} に関する最新発表です。")
+        if len(points) == 1:
+            points.append(f"{orig['source']} で公開された注目のAI動向・活用事例です。")
+        if len(points) == 2:
+            points.append("詳しい検証データや背景については「元記事を開く」から確認できます。")
+
+        if orig["category"] == "paper":
+            insight = "Hugging Faceで注目されている最新AI研究論文。手法や実験結果の詳細は元論文ページで確認できます。"
+        elif orig["category"] == "global":
+            insight = f"{orig['source']} による海外の最新AIトレンド・公式発表。今後のツール活用や開発動向の参考になります。"
+        else:
+            insight = f"{orig['source']} で話題の国内AIニュース。実務への応用や業界動向の把握に役立ちます。"
 
         resolved_items.append(
             {
-                "title_ja": orig["title"][:60],
+                "title_ja": title_ja,
                 "category": orig["category"],
                 "source": orig["source"],
                 "url": orig["url"],
                 "rating": 5 if idx < 3 else 4,
-                "points": [p[:80] for p in points[:3]],
-                "insight": f"{orig['source']}からの最新AI動向。リンク先から詳細な発表内容を確認できます。",
+                "points": [p[:90] for p in points[:3]],
+                "insight": insight,
             }
         )
 
@@ -275,7 +349,7 @@ def build_rss_fallback_digest(indexed_candidates: list[dict], date_str: str) -> 
         "date": date_str,
         "generated_at": datetime.now(JST).strftime("%Y-%m-%d %H:%M JST"),
         "headline": f"{date_str} の注目AIニュース・論文ピックアップ10選",
-        "overview": "海外公式ブログ・大手テックメディア・国内AIメディア・Hugging Face注目論文から最新の10件をサイト別に収集しました。",
+        "overview": "海外公式ブログ・大手テックメディア・国内AIメディア・Hugging Face注目論文から最新の10件を厳選し、日本語に翻訳・要約しました。",
         "items": resolved_items,
     }
 
@@ -330,7 +404,9 @@ def summarize_with_gemini(candidates: list[dict], date_str: str) -> dict:
         if github_token:
             try:
                 print("[INFO] Trying free GitHub Models fallback...")
-                digest_data = call_github_models_fallback(prompt, github_token)
+                digest_data = call_github_models_fallback(
+                    indexed_candidates, date_str, github_token
+                )
                 print("[INFO] Summarized successfully with GitHub Models (gpt-4o-mini)")
             except Exception as e:
                 print(f"[WARN] GitHub Models fallback failed: {e}")
@@ -347,15 +423,18 @@ def summarize_with_gemini(candidates: list[dict], date_str: str) -> dict:
         orig = candidate_map.get(cid)
         if not orig:
             continue
+        title_ja = translate_en_to_ja(selected.get("title_ja", orig["title"]))
+        points_ja = [translate_en_to_ja(pt) for pt in selected.get("points", [])[:3]]
+        insight_ja = translate_en_to_ja(selected.get("insight", ""))
         resolved_items.append(
             {
-                "title_ja": selected["title_ja"],
+                "title_ja": title_ja,
                 "category": orig["category"],
                 "source": orig["source"],
                 "url": orig["url"],
                 "rating": selected.get("rating", 4),
-                "points": selected.get("points", [])[:3],
-                "insight": selected.get("insight", ""),
+                "points": points_ja,
+                "insight": insight_ja,
             }
         )
 

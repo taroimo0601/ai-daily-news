@@ -197,15 +197,90 @@ def load_recent_urls(days: int = 3) -> set[str]:
     return seen_urls
 
 
-def summarize_with_gemini(candidates: list[dict], date_str: str) -> dict:
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "環境変数 GEMINI_API_KEY が設定されていません。Google AI Studioで発行したキーを設定してください。"
+def call_github_models_fallback(prompt: str, github_token: str) -> dict:
+    """GitHub Actions内蔵のGITHUB_TOKEN（無料枠）を使ってOpenAI互換モデルで要約を生成する"""
+    url = "https://models.github.ai/inference/chat/completions"
+    schema_instruction = """
+出力は必ず以下のJSON形式のみ（マークダウンのコードブロックなし）で返してください:
+{
+  "headline": "キャッチコピー（35文字以内）",
+  "overview": "今日の全体トレンドの30秒サマリー（120〜180文字程度）",
+  "items": [
+    {
+      "candidate_id": 0,
+      "title_ja": "日本語タイトル（45文字以内）",
+      "rating": 5,
+      "points": ["要点1", "要点2", "要点3"],
+      "insight": "一言解説（60〜90文字程度）"
+    }
+  ]
+}
+"""
+    resp = requests.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {github_token}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": "openai/gpt-4o-mini",
+            "messages": [
+                {"role": "system", "content": "You are a helpful AI news curator that outputs valid JSON in Japanese."},
+                {"role": "user", "content": prompt + "\n" + schema_instruction},
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0.3,
+        },
+        timeout=60,
+    )
+    resp.raise_for_status()
+    content = resp.json()["choices"][0]["message"]["content"]
+    return json.loads(content)
+
+
+def build_rss_fallback_digest(indexed_candidates: list[dict], date_str: str) -> dict:
+    """APIクレジット不足時でもワークフローを止めずにサイト別10件を生成するフォールバック"""
+    by_source: dict[str, list[dict]] = {}
+    for c in indexed_candidates:
+        by_source.setdefault(c["source"], []).append(c)
+
+    selected = []
+    # 各サイトから最大2件ずつバランスよく最大10件選ぶ
+    for round_idx in range(2):
+        for src, items in by_source.items():
+            if round_idx < len(items) and len(selected) < 10:
+                selected.append(items[round_idx])
+
+    resolved_items = []
+    for idx, orig in enumerate(selected):
+        summary_text = orig.get("summary", "") or orig["title"]
+        sentences = [s.strip() for s in re.split(r"[。.!?！？]+", summary_text) if len(s.strip()) > 8]
+        points = sentences[:3]
+        while len(points) < 3:
+            points.append(f"{orig['source']}で公開された注目トピックです（詳細は元記事を参照）")
+
+        resolved_items.append(
+            {
+                "title_ja": orig["title"][:60],
+                "category": orig["category"],
+                "source": orig["source"],
+                "url": orig["url"],
+                "rating": 5 if idx < 3 else 4,
+                "points": [p[:80] for p in points[:3]],
+                "insight": f"{orig['source']}からの最新AI動向。リンク先から詳細な発表内容を確認できます。",
+            }
         )
 
-    client = genai.Client(api_key=api_key)
+    return {
+        "date": date_str,
+        "generated_at": datetime.now(JST).strftime("%Y-%m-%d %H:%M JST"),
+        "headline": f"{date_str} の注目AIニュース・論文ピックアップ10選",
+        "overview": "海外公式ブログ・大手テックメディア・国内AIメディア・Hugging Face注目論文から最新の10件をサイト別に収集しました。",
+        "items": resolved_items,
+    }
 
+
+def summarize_with_gemini(candidates: list[dict], date_str: str) -> dict:
     indexed_candidates = [
         {"candidate_id": idx, **item} for idx, item in enumerate(candidates)
     ]
@@ -228,22 +303,47 @@ def summarize_with_gemini(candidates: list[dict], date_str: str) -> dict:
 {candidates_text}
 """
 
-    response = client.models.generate_content(
-       model="gemini-3.8-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=DailyDigest,
-            temperature=0.3,
-        ),
-    )
+    digest_data = None
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
 
-    digest_data = json.loads(response.text)
+    if api_key:
+        client = genai.Client(api_key=api_key)
+        for model_name in ["gemini-3.8-flash", "gemini-3.8-flash-lite", "gemini-2.0-flash"]:
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=DailyDigest,
+                        temperature=0.3,
+                    ),
+                )
+                digest_data = json.loads(response.text)
+                print(f"[INFO] Summarized successfully with Gemini ({model_name})")
+                break
+            except Exception as e:
+                print(f"[WARN] Gemini ({model_name}) failed: {e}")
+
+    if digest_data is None:
+        github_token = os.environ.get("GITHUB_TOKEN", "").strip()
+        if github_token:
+            try:
+                print("[INFO] Trying free GitHub Models fallback...")
+                digest_data = call_github_models_fallback(prompt, github_token)
+                print("[INFO] Summarized successfully with GitHub Models (gpt-4o-mini)")
+            except Exception as e:
+                print(f"[WARN] GitHub Models fallback failed: {e}")
+
+    if digest_data is None:
+        print("[WARN] Using built-in RSS fallback summarizer...")
+        return build_rss_fallback_digest(indexed_candidates, date_str)
+
     candidate_map = {item["candidate_id"]: item for item in indexed_candidates}
 
     resolved_items = []
-    for selected in digest_data["items"]:
-        cid = selected["candidate_id"]
+    for selected in digest_data.get("items", []):
+        cid = selected.get("candidate_id")
         orig = candidate_map.get(cid)
         if not orig:
             continue
@@ -253,9 +353,9 @@ def summarize_with_gemini(candidates: list[dict], date_str: str) -> dict:
                 "category": orig["category"],
                 "source": orig["source"],
                 "url": orig["url"],
-                "rating": selected["rating"],
-                "points": selected["points"],
-                "insight": selected["insight"],
+                "rating": selected.get("rating", 4),
+                "points": selected.get("points", [])[:3],
+                "insight": selected.get("insight", ""),
             }
         )
 
